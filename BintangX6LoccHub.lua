@@ -887,12 +887,13 @@ local tabs = {
 		right = {
 			card("Veil Spear Aim Lock", {
 				toggle("Aim Lock (Kamera)"),
-				toggle("Show FOV", true),
 				toggle("Aura CD Tracker", true),
 				slider("FOV (derajat)", 30, 360, 120),
 			}),
 			card("Veil Spear Silent", {
 				toggle("Silent Veil"),
+				toggle("Show FOV", true),
+				toggle("Show Laser", true),
 				slider("Silent FOV (derajat)", 20, 170, 145),
 				slider("Silent Max Range", 50, 500, 280, 10),
 				slider("Prediction", 0, 2, 1.18, 0.01),
@@ -3467,6 +3468,8 @@ end
 setupFlashAim()
 
 -- SILENT VEIL (spear auto-aim). Your logic, always active while the toggle is on.
+local veilLockState = { target = nil }
+
 local function setupVeilAim()
 	local runService = game:GetService("RunService")
 	local replicatedStorage = game:GetService("ReplicatedStorage")
@@ -3604,6 +3607,15 @@ local function setupVeilAim()
 		Visible = false,
 	}, gui)
 
+	local laserLine = create("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		BackgroundColor3 = CONFIG.COLOR_LOCK,
+		BorderSizePixel = 0,
+		Size = UDim2.fromOffset(0, 2),
+		Visible = false,
+		ZIndex = 5,
+	}, gui)
+
 	local cdLabel = create("TextLabel", {
 		Size = UDim2.fromOffset(250, 34),
 		Position = UDim2.new(0.5, -125, 0, 20),
@@ -3627,10 +3639,26 @@ local function setupVeilAim()
 		return math.min(radius, viewport.Y * 0.95)
 	end
 
+	-- The drawn circle follows Silent's FOV (the card it now lives under), not Aim Lock's.
+	local function getVisualFovRadius()
+		local camera = workspace.CurrentCamera
+		local viewport = camera.ViewportSize
+		local cameraFov = math.rad(camera.FieldOfView)
+		local cappedFov = math.clamp(flags["Killer.Silent FOV (derajat)"] or 145, 20, 170)
+		local half = math.rad(cappedFov * 0.5)
+		local radius = (viewport.Y / 2) * (math.tan(half) / math.tan(cameraFov / 2))
+		return math.min(radius, viewport.Y * 0.95)
+	end
+
+	local function isKillerTeam()
+		local team = localPlayer.Team
+		return team ~= nil and team.Name == "Killer"
+	end
+
 	local function updateFovCircle()
-		fovCircle.Visible = aimActive() and flags["Killer.Show FOV"] == true
+		fovCircle.Visible = isKillerTeam() and flags["Killer.Show FOV"] == true
 		if fovCircle.Visible then
-			local radius = getFovRadius()
+			local radius = getVisualFovRadius()
 			fovCircle.Size = UDim2.fromOffset(radius * 2, radius * 2)
 		end
 	end
@@ -3736,6 +3764,9 @@ local function setupVeilAim()
 		end
 
 		lockedTarget = best
+		if flags["Killer.Aim Lock (Kamera)"] then
+			veilLockState.target = best
+		end
 	end
 
 	-- Camera snap using the live target position and the ballistic arc.
@@ -3777,6 +3808,36 @@ local function setupVeilAim()
 		else
 			lockLabel.Visible = false
 		end
+	end
+
+	-- Laser from the screen center to whichever target is currently locked.
+	local function updateLaser()
+		local target = flags["Killer.Show Laser"] and veilLockState.target
+
+		local character = target and target.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+
+		if not root or not root.Parent then
+			laserLine.Visible = false
+			return
+		end
+
+		local camera = workspace.CurrentCamera
+		local screenPoint, onScreen = camera:WorldToViewportPoint(root.Position)
+		if not onScreen then
+			laserLine.Visible = false
+			return
+		end
+
+		local viewport = camera.ViewportSize
+		local from = Vector2.new(viewport.X / 2, viewport.Y)
+		local to = Vector2.new(screenPoint.X, screenPoint.Y)
+		local delta = to - from
+
+		laserLine.Position = UDim2.fromOffset(from.X, from.Y)
+		laserLine.Size = UDim2.fromOffset(delta.Magnitude, 2)
+		laserLine.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+		laserLine.Visible = true
 	end
 
 	-- Aura cooldown label.
@@ -3923,6 +3984,7 @@ local function setupVeilAim()
 		updateFovCircle()
 		updateTarget(deltaTime)
 		updateCdLabel()
+		updateLaser()
 	end))
 
 	-- Remove the render step and the hook when the hub closes.
@@ -4077,6 +4139,8 @@ local function setupSilentVeil()
 	local function updateSilentTarget(deltaTime)
 		if not flags["Killer.Silent Veil"] then
 			silentLockedTarget, lastAimDir, lastVelocity = nil, nil, Vector3.zero
+			veilLockState.target = nil
+			VeilShared.silentTarget = nil
 			return
 		end
 
@@ -4094,10 +4158,14 @@ local function setupSilentVeil()
 
 			if not (character and character.Parent and humanoid and root and isValidTarget(character, humanoid)) then
 				silentLockedTarget, lastAimDir, lastVelocity = nil, nil, Vector3.zero
+				veilLockState.target = nil
+				VeilShared.silentTarget = nil
 			else
 				local distance = (root.Position - origin).Magnitude
 				if distance > maxRange then
 					silentLockedTarget, lastAimDir, lastVelocity = nil, nil, Vector3.zero
+					veilLockState.target = nil
+					VeilShared.silentTarget = nil
 				else
 					local screenPoint, onScreen = camera:WorldToViewportPoint(root.Position)
 					local inside = onScreen and (Vector2.new(screenPoint.X, screenPoint.Y) - center).Magnitude <= radius
@@ -4112,6 +4180,7 @@ local function setupSilentVeil()
 					end
 
 					silentLockedTarget, lastAimDir = nil, nil
+					VeilShared.silentTarget = nil
 				end
 			end
 		end
@@ -4151,6 +4220,9 @@ local function setupSilentVeil()
 		end
 
 		silentLockedTarget = best
+		if flags["Killer.Silent Veil"] then
+			veilLockState.target = best
+		end
 		if best then
 			local root = best.Character:FindFirstChild("HumanoidRootPart")
 			if root then
